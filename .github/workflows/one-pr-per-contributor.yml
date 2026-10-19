@@ -9,7 +9,7 @@ name: one-pr-per-contributor
 #   - Org members with write access are exempt (maintainers may stack PRs)
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [development]
     types: [opened, reopened, synchronize]
 

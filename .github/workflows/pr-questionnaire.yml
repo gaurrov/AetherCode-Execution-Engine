@@ -7,7 +7,7 @@ name: pr-questionnaire
 # Maintainers (write/admin) are exempt — they can merge without filling it out.
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [development]
     types: [opened, edited, reopened, synchronize]
 

@@ -15,6 +15,8 @@ reviews:
     base_branches:
       - ".*"
     drafts: true
+    # Review every new commit pushed to an open PR, not just on open/reopen.
+    auto_incremental_review: true
     ignore_title_keywords:
       - "WIP"
       - "[skip ci]"

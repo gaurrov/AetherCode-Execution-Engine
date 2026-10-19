@@ -2,9 +2,13 @@ name: labeler
 
 # Auto-labels PRs based on the files they touch.
 # Labels are defined in .github/labeler.yml
+#
+# Uses pull_request_target so the GITHUB_TOKEN has write access even for
+# fork PRs. The labeler only reads PR metadata (file paths) — it never
+# checks out untrusted code — so pull_request_target is safe here.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -13,7 +17,6 @@ permissions:
 
 jobs:
   label:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/labeler@v5
