@@ -78,6 +78,19 @@ func executeAndStream(t *testing.T, expectedOutput string) map[string]any {
 		t.Fatalf("execute response missing job_id or stream_token: %+v", exec)
 	}
 
+	// The same job must not stream without its token.
+	for _, tok := range []string{"", exec.StreamToken + "x"} {
+		q := url.Values{"job_id": {exec.JobID}, "stream_token": {tok}}
+		bad, err := http.Get(baseURL + "/api/v1/stream?" + q.Encode())
+		if err != nil {
+			t.Fatalf("GET /stream with stream_token %q: %v", tok, err)
+		}
+		_ = bad.Body.Close()
+		if bad.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("GET /stream with stream_token %q: status = %d, want 401", tok, bad.StatusCode)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	q := url.Values{"job_id": {exec.JobID}, "stream_token": {exec.StreamToken}}
