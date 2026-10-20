@@ -105,16 +105,14 @@ func (h *Handler) Register(mux *http.ServeMux) {
 }
 
 type executeRequest struct {
-	Language         string      `json:"language"`
-	SourceCode       string      `json:"source_code"`
-	Mode             string      `json:"mode"`
-	ProblemVersionID *string     `json:"problem_version_id"`
-	IdempotencyKey   *string     `json:"idempotency_key"`
-	Tests            []testInput `json:"tests"`
-	// Optional run-mode limits; omitted means the language defaults.
+	Language       string      `json:"language"`
+	SourceCode     string      `json:"source_code"`
+	IdempotencyKey *string     `json:"idempotency_key"`
+	Tests          []testInput `json:"tests"`
+	// Optional limits; omitted means the language defaults.
 	TimeLimitMs   *uint64 `json:"time_limit_ms"`
 	MemoryLimitKb *uint64 `json:"memory_limit_kb"`
-	// Optional run-mode output checker: exact (default), token or float.
+	// Optional output checker: exact (default), token or float.
 	Checker string `json:"checker"`
 }
 
@@ -159,14 +157,6 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Mode == "" {
-		req.Mode = string(model.ModeRun)
-	}
-	if req.Mode != string(model.ModeRun) && req.Mode != string(model.ModeSubmit) {
-		jsonError(w, "mode must be 'run' or 'submit'", http.StatusBadRequest)
-		return
-	}
-
 	if _, ok := sandbox.Languages[req.Language]; !ok {
 		jsonError(w, "unsupported language", http.StatusBadRequest)
 		return
@@ -183,50 +173,23 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	identity, hasAuth := auth.GetIdentity(ctx)
 
-	// Mode-specific validation
-	if req.Mode == string(model.ModeSubmit) {
-		if !hasAuth {
-			jsonError(w, "authentication required for submit mode", http.StatusUnauthorized)
+	if len(req.Tests) == 0 {
+		jsonError(w, "at least one test is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.Tests) > maxTests {
+		jsonError(w, "too many tests (max 100)", http.StatusBadRequest)
+		return
+	}
+	for _, t := range req.Tests {
+		if len(t.Input) > maxTestDataSize || len(t.ExpectedOutput) > maxTestDataSize {
+			jsonError(w, "test input/output exceeds 8MB", http.StatusBadRequest)
 			return
 		}
-		if req.ProblemVersionID == nil || *req.ProblemVersionID == "" {
-			jsonError(w, "problem_version_id is required for submit mode", http.StatusBadRequest)
-			return
-		}
-		pvID, err := uuid.Parse(*req.ProblemVersionID)
-		if err != nil {
-			jsonError(w, "invalid problem_version_id", http.StatusBadRequest)
-			return
-		}
-		pv, err := db.GetProblemVersion(ctx, h.pool, pvID)
-		if err != nil {
-			jsonError(w, "problem version not found", http.StatusNotFound)
-			return
-		}
-		if pv.TenantID != identity.TenantID {
-			jsonError(w, "problem version not found", http.StatusNotFound)
-			return
-		}
-	} else {
-		// Run mode: tests from client
-		if len(req.Tests) == 0 {
-			jsonError(w, "at least one test is required", http.StatusBadRequest)
-			return
-		}
-		if len(req.Tests) > maxTests {
-			jsonError(w, "too many tests (max 100)", http.StatusBadRequest)
-			return
-		}
-		for _, t := range req.Tests {
-			if len(t.Input) > maxTestDataSize || len(t.ExpectedOutput) > maxTestDataSize {
-				jsonError(w, "test input/output exceeds 8MB", http.StatusBadRequest)
-				return
-			}
-		}
-		if !model.ValidChecker(req.Checker) {
-			jsonError(w, "checker must be one of: exact, token, float", http.StatusBadRequest)
-			return
-		}
+	}
+	if !model.ValidChecker(req.Checker) {
+		jsonError(w, "checker must be one of: exact, token, float", http.StatusBadRequest)
+		return
 	}
 
 	var limits sandbox.RunLimits
@@ -268,11 +231,7 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Pick the target stream based on mode
 	targetStream := h.runStream
-	if req.Mode == string(model.ModeSubmit) {
-		targetStream = h.submitStream
-	}
 
 	// Admission control — reject if queue is too deep
 	admitted, err := ratelimit.AdmissionCheck(ctx, h.rdb, targetStream.StreamName(), h.admissionMaxQueueDepth)
@@ -294,7 +253,7 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	sub := &model.Submission{
 		ID:         id,
 		TenantID:   model.DefaultTenantID,
-		Mode:       req.Mode,
+		Mode:       string(model.ModeRun), // column is dropped in a later change; InsertSubmission still binds it
 		Language:   req.Language,
 		SourceCode: req.SourceCode,
 		Status:     model.StatusQueued,
@@ -303,10 +262,6 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	if hasAuth {
 		sub.TenantID = identity.TenantID
 		sub.UserID = &identity.UserID
-	}
-	if req.ProblemVersionID != nil {
-		pvID, _ := uuid.Parse(*req.ProblemVersionID)
-		sub.ProblemVersionID = &pvID
 	}
 	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
 		if len(*req.IdempotencyKey) > maxIdempotencyKeyLen {
@@ -342,12 +297,9 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store tests + publish QUEUED event + enqueue in a single Redis pipeline
-	var tests []queue.TestData
-	if req.Mode == string(model.ModeRun) {
-		tests = make([]queue.TestData, len(req.Tests))
-		for i, t := range req.Tests {
-			tests[i] = queue.TestData{Input: t.Input, ExpectedOutput: t.ExpectedOutput}
-		}
+	tests := make([]queue.TestData, len(req.Tests))
+	for i, t := range req.Tests {
+		tests[i] = queue.TestData{Input: t.Input, ExpectedOutput: t.ExpectedOutput}
 	}
 
 	queuedEvt := eventlog.New(jobID.String(), eventlog.EventQueued, nil)
@@ -359,17 +311,15 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 
 	resp := executeResponse{JobID: jobID.String()}
 
-	// Issue a stream token for unauthenticated run-mode callers so they can open
-	// the SSE stream without needing to guess the job UUID. Authenticated callers
-	// use their JWT for ownership verification and do not need this token.
-	if !hasAuth && req.Mode == string(model.ModeRun) {
-		tok, err := newStreamToken(ctx, h.rdb, jobID.String())
-		if err != nil {
-			slog.Warn("failed to generate stream token", "job_id", jobID, "err", err)
-			// Non-fatal: the client will need auth to stream, but the job is queued.
-		} else {
-			resp.StreamToken = tok
-		}
+	// Issue a stream token for every new job. Unauthenticated callers need it to
+	// open the SSE stream or cancel the job; authenticated callers may use their
+	// JWT instead.
+	tok, err := newStreamToken(ctx, h.rdb, jobID.String())
+	if err != nil {
+		slog.Warn("failed to generate stream token", "job_id", jobID, "err", err)
+		// Non-fatal: the client will need auth to stream, but the job is queued.
+	} else {
+		resp.StreamToken = tok
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -508,7 +458,7 @@ func (h *Handler) HandleLanguages(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleCancel cancels a queued submission. Only the submission owner (authenticated)
-// or an unauthenticated caller on run-mode jobs may cancel.
+// or an unauthenticated caller presenting the job's stream_token may cancel.
 func (h *Handler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 	rawID := r.PathValue("id")
 	parsedID, err := uuid.Parse(rawID)
@@ -532,9 +482,14 @@ func (h *Handler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "not found", http.StatusNotFound)
 			return
 		}
-	} else if sub.ProblemVersionID != nil {
-		jsonError(w, "authentication required", http.StatusUnauthorized)
-		return
+	} else {
+		tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		valid := verifyStreamToken(tokenCtx, h.rdb, parsedID.String(), r.URL.Query().Get("stream_token"))
+		tokenCancel()
+		if !valid {
+			jsonError(w, "invalid or missing stream_token", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	if err := db.CancelSubmission(ctx, h.pool, parsedID); err != nil {

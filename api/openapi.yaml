@@ -12,9 +12,9 @@ info:
     Endpoints are protected by OIDC Bearer JWT (Zitadel). Pass the token in the
     `Authorization: Bearer <token>` header.
 
-    - `POST /api/v1/execute` (submit mode) — **required**
-    - `POST /api/v1/execute` (run mode) — optional; unauthenticated callers receive a `stream_token`
+    - `POST /api/v1/execute` — optional; every new job receives a `stream_token`
     - `GET /api/v1/stream` — optional; unauthenticated callers must supply `stream_token`
+    - `DELETE /api/v1/submissions/{id}` — optional; unauthenticated callers must supply `stream_token`
     - `GET /api/v1/health` — public
     - `GET /api/v1/languages` — public
 
@@ -81,15 +81,6 @@ components:
         `token` — equal as whitespace-separated tokens.
         `float` — tokens compared as numbers with an absolute tolerance of 1e-6; non-numeric tokens must match exactly.
 
-    Mode:
-      type: string
-      enum:
-        - run
-        - submit
-      description: |
-        `run` — caller-supplied test cases, results fully visible.
-        `submit` — test cases loaded from the problem version, hidden test outputs masked.
-
     Verdict:
       type: string
       enum:
@@ -137,6 +128,7 @@ components:
       required:
         - language
         - source_code
+        - tests
       properties:
         language:
           $ref: "#/components/schemas/Language"
@@ -145,22 +137,12 @@ components:
           minLength: 1
           maxLength: 65536
           description: Source code to execute (max 64 KB).
-        mode:
-          $ref: "#/components/schemas/Mode"
-          default: run
-        problem_version_id:
-          type: string
-          format: uuid
-          description: |
-            Required when `mode=submit`. UUID of the problem version whose
-            test cases will be used. Must belong to the caller's tenant.
-          example: "018f1d2e-3456-7890-abcd-ef0123456789"
         idempotency_key:
           type: string
           maxLength: 255
           description: |
             Client-supplied deduplication key. If a submission with the same
-            `(tenant, user, idempotency_key, mode)` already exists, the existing
+            `(tenant, user, idempotency_key)` already exists, the existing
             `job_id` is returned without re-executing. Optional.
           example: "exam-2024-q3-user42-attempt1"
         tests:
@@ -170,11 +152,11 @@ components:
           items:
             $ref: "#/components/schemas/TestInput"
           description: |
-            Required when `mode=run`. Caller-supplied test cases. Maximum 100 tests.
+            Caller-supplied test cases. Maximum 100 tests.
         checker:
           $ref: "#/components/schemas/Checker"
           description: |
-            Run mode only. Output comparison used for every test. Omit for `exact`.
+            Output comparison used for every test. Omit for `exact`.
         time_limit_ms:
           type: integer
           format: int64
@@ -207,8 +189,9 @@ components:
         stream_token:
           type: string
           description: |
-            Present only for unauthenticated `run`-mode submissions.
-            Must be passed as `stream_token` query parameter to `/api/v1/stream`.
+            Issued for every new job. Unauthenticated callers must pass it as the
+            `stream_token` query parameter to `/api/v1/stream` and to
+            `DELETE /api/v1/submissions/{id}`.
           example: "dGhpcyBpcyBhIHRlc3Q"
 
     ErrorResponse:
@@ -469,8 +452,7 @@ components:
             results:
               type: array
               description: |
-                Per-test results. In `submit` mode, `stdout_preview` and `stderr_preview`
-                are only included for sample tests.
+                Per-test results.
               items:
                 type: object
                 required: [test_index, verdict]
@@ -493,10 +475,10 @@ components:
                     maxLength: 256
                   stdout:
                     type: string
-                    description: Full stdout (run mode only).
+                    description: Full stdout.
                   stderr:
                     type: string
-                    description: Full stderr (run mode only).
+                    description: Full stderr.
 
 paths:
 
@@ -507,20 +489,17 @@ paths:
       description: |
         Accepts a source code submission and enqueues it for sandboxed execution.
 
-        **Run mode** (`mode=run`): caller supplies test cases. No authentication
-        required; a `stream_token` is returned for use with the SSE endpoint.
-
-        **Submit mode** (`mode=submit`): test cases are loaded from a problem version
-        in the database. Authentication **required**. The caller must own the
-        `problem_version_id` within their tenant.
+        The caller supplies the test cases (`tests`, at least one). Authentication is
+        optional; a `stream_token` is returned for every new job for use with the SSE
+        and cancel endpoints.
 
         The response is `201 Created` with a `job_id`. Poll the job's verdict by
         opening the SSE stream at `GET /api/v1/stream?job_id=<job_id>`.
       tags:
         - Execution
       security:
-        - {}          # unauthenticated (run mode)
-        - bearerAuth: []  # required for submit mode
+        - {}          # unauthenticated
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -529,16 +508,15 @@ paths:
               $ref: "#/components/schemas/ExecuteRequest"
             examples:
               run_python:
-                summary: Run mode — Python Hello World
+                summary: Python Hello World
                 value:
                   language: python
                   source_code: "print('Hello, World!')"
-                  mode: run
                   tests:
                     - input: ""
                       expected_output: "Hello, World!"
               run_cpp_with_limits:
-                summary: Run mode — C++ with custom limits
+                summary: C++ with custom limits
                 value:
                   language: cpp
                   source_code: |
@@ -547,25 +525,11 @@ paths:
                         int n; std::cin >> n;
                         std::cout << n * 2 << std::endl;
                     }
-                  mode: run
                   time_limit_ms: 500
                   memory_limit_kb: 65536
                   tests:
                     - input: "21"
                       expected_output: "42"
-              submit_mode:
-                summary: Submit mode — authenticated, problem version
-                value:
-                  language: java
-                  source_code: |
-                    public class Main {
-                        public static void main(String[] args) {
-                            System.out.println("Hello");
-                        }
-                    }
-                  mode: submit
-                  problem_version_id: "018f1d2e-3456-7890-abcd-ef0123456789"
-                  idempotency_key: "exam-2024-q1-user42-attempt1"
       responses:
         "201":
           description: Submission accepted and queued.
@@ -574,15 +538,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/ExecuteResponse"
               examples:
-                run_mode:
-                  summary: Run mode response (includes stream_token)
+                created:
+                  summary: Accepted job (includes stream_token)
                   value:
                     job_id: "018f1d2e-3456-7890-abcd-ef0123456789"
                     stream_token: "dGhpcyBpcyBhIHRlc3Q"
-                submit_mode:
-                  summary: Submit mode response
-                  value:
-                    job_id: "018f1d2e-3456-7890-abcd-ef0123456789"
         "200":
           description: Idempotent response — submission with this key already exists.
           content:
@@ -596,13 +556,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "401":
-          description: Authentication required (submit mode without token, or invalid token).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: problem_version_id not found or not accessible to this tenant.
+          description: Invalid bearer token.
           content:
             application/json:
               schema:
@@ -650,7 +604,7 @@ paths:
 
         **Authentication:** Authenticated callers are verified by JWT ownership
         (tenant + user ID). Unauthenticated callers must pass the `stream_token`
-        returned from `POST /api/v1/execute`. Submit-mode jobs always require auth.
+        returned from `POST /api/v1/execute`.
       tags:
         - Execution
       security:

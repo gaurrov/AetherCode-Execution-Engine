@@ -68,11 +68,6 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Unauthenticated callers must present the stream_token issued at job creation.
 		// This prevents UUIDv7-based enumeration of other users' streams.
-		// Submit-mode jobs always require authentication (ProblemVersionID != nil).
-		if sub.ProblemVersionID != nil {
-			http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
-			return
-		}
 		streamToken := r.URL.Query().Get("stream_token")
 		tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		valid := verifyStreamToken(tokenCtx, h.rdb, safeJobID, streamToken)

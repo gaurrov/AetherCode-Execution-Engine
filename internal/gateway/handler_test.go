@@ -340,3 +340,60 @@ func TestHandleExecute_RejectsUnknownChecker(t *testing.T) {
 		t.Errorf("error = %q", resp.Error)
 	}
 }
+
+func TestHandleExecute_LegacySubmitPayloadRejected(t *testing.T) {
+	judgeSrv := fakeJudgeServer(t, "1.13.0")
+	judge := sandbox.NewClient(judgeSrv.URL, "test-token")
+	_, rdb := newTestRedis(t)
+
+	submitStream := queue.NewStream(rdb, "ac:submissions:submit", "workers")
+	runStream := queue.NewStream(rdb, "ac:submissions:run", "workers")
+	h := NewHandler(nil, submitStream, runStream, queue.NewPubSub(rdb), judge, rdb, nil, nil, 5000, 8)
+
+	body := `{"language":"python","source_code":"print(1)","mode":"submit","problem_version_id":"0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"}`
+	rec := postExecute(h, body)
+	assertExecuteError(t, rec, http.StatusBadRequest, "at least one test is required")
+
+	for _, s := range []*queue.Stream{submitStream, runStream} {
+		if n, _ := rdb.XLen(context.Background(), s.StreamName()).Result(); n != 0 {
+			t.Errorf("XLen(%s) = %d, want 0", s.StreamName(), n)
+		}
+	}
+}
+
+func TestHandleExecute_RequiresTests(t *testing.T) {
+	judgeSrv := fakeJudgeServer(t, "1.13.0")
+	judge := sandbox.NewClient(judgeSrv.URL, "test-token")
+	_, rdb := newTestRedis(t)
+
+	submitStream := queue.NewStream(rdb, "ac:submissions:submit", "workers")
+	runStream := queue.NewStream(rdb, "ac:submissions:run", "workers")
+	h := NewHandler(nil, submitStream, runStream, queue.NewPubSub(rdb), judge, rdb, nil, nil, 5000, 8)
+
+	rec := postExecute(h, `{"language":"python","source_code":"print(1)"}`)
+	assertExecuteError(t, rec, http.StatusBadRequest, "at least one test is required")
+}
+
+func postExecute(h *Handler, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/execute", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.HandleExecute(rec, req)
+	return rec
+}
+
+func assertExecuteError(t *testing.T, rec *httptest.ResponseRecorder, code int, msg string) {
+	t.Helper()
+	if rec.Code != code {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, code, rec.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if resp.Error != msg {
+		t.Errorf("error = %q, want %q", resp.Error, msg)
+	}
+}

@@ -20,8 +20,14 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/google/uuid"
+	goredis "github.com/redis/go-redis/v9"
+
+	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/auth"
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/eventlog"
+	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/model"
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/queue"
+	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/ratelimit"
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/sandbox"
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/worker"
 )
@@ -72,7 +78,7 @@ func runBody(expectedOutput, checker string) string {
 	if checker != "" {
 		c = fmt.Sprintf(`"checker":%q,`, checker)
 	}
-	return fmt.Sprintf(`{"language":"python","source_code":"print(1+2)","mode":"run",%s"tests":[{"input":"","expected_output":%q}]}`, c, expectedOutput)
+	return fmt.Sprintf(`{"language":"python","source_code":"print(1+2)",%s"tests":[{"input":"","expected_output":%q}]}`, c, expectedOutput)
 }
 
 // executeAndStream POSTs body (a run-mode request for a single python test) to /execute
@@ -210,6 +216,24 @@ func readSSE(ctx context.Context, r io.Reader, out chan<- eventlog.Event) {
 // that unblocks the judge's /run response.
 func startExecutionStack(t *testing.T) (string, func()) {
 	t.Helper()
+	st := startStack(t, stackOptions{})
+	return st.baseURL, st.releaseJudge
+}
+
+// stackOptions tweaks the stack built by startStack.
+type stackOptions struct {
+	wrap    func(http.Handler) http.Handler // wraps the gateway mux (e.g. to inject an identity)
+	limiter *ratelimit.Limiter              // per-user limiter; required for authenticated callers
+}
+
+type stack struct {
+	baseURL      string
+	releaseJudge func()
+	rdb          *goredis.Client
+}
+
+func startStack(t *testing.T, opts stackOptions) *stack {
+	t.Helper()
 
 	pool := newFakePGPool(t)
 	_, rdb := newTestRedis(t)
@@ -230,8 +254,12 @@ func startExecutionStack(t *testing.T) (string, func()) {
 	ps := queue.NewPubSub(rdb)
 
 	mux := http.NewServeMux()
-	NewHandler(pool, submitStream, runStream, ps, judge, rdb, nil, nil, 5000, 1).Register(mux)
-	gw := httptest.NewServer(mux)
+	NewHandler(pool, submitStream, runStream, ps, judge, rdb, opts.limiter, nil, 5000, 1).Register(mux)
+	var root http.Handler = mux
+	if opts.wrap != nil {
+		root = opts.wrap(mux)
+	}
+	gw := httptest.NewServer(root)
 	t.Cleanup(func() {
 		gw.Close()
 		ps.Wait()
@@ -245,7 +273,86 @@ func startExecutionStack(t *testing.T) (string, func()) {
 		wg.Wait()
 	})
 
-	return gw.URL, releaseJudge
+	return &stack{baseURL: gw.URL, releaseJudge: releaseJudge, rdb: rdb}
+}
+
+func TestExecute_AuthenticatedCallerGetsStreamToken(t *testing.T) {
+	_, rdb := newTestRedis(t)
+	userID := uuid.New()
+	st := startStack(t, stackOptions{
+		limiter: ratelimit.New(rdb, 1000, 1000),
+		wrap: func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx := auth.WithIdentity(r.Context(), auth.Identity{TenantID: model.DefaultTenantID, UserID: userID})
+				next.ServeHTTP(w, r.WithContext(ctx))
+			})
+		},
+	})
+
+	resp, err := http.Post(st.baseURL+"/api/v1/execute", "application/json", strings.NewReader(runBody("3", "")))
+	if err != nil {
+		t.Fatalf("POST /execute: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort: test response body
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201: %s", resp.StatusCode, b)
+	}
+	var exec executeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&exec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if exec.StreamToken == "" {
+		t.Error("authenticated caller got no stream_token")
+	}
+	n, err := st.rdb.XLen(context.Background(), "ac:submissions:run").Result()
+	if err != nil || n == 0 {
+		t.Errorf("XLen(ac:submissions:run) = %d, %v; want non-zero", n, err)
+	}
+}
+
+func TestHandleCancel_UnauthRequiresStreamToken(t *testing.T) {
+	st := startStack(t, stackOptions{})
+
+	resp, err := http.Post(st.baseURL+"/api/v1/execute", "application/json", strings.NewReader(runBody("3", "")))
+	if err != nil {
+		t.Fatalf("POST /execute: %v", err)
+	}
+	var exec executeResponse
+	err = json.NewDecoder(resp.Body).Decode(&exec)
+	_ = resp.Body.Close()
+	if err != nil || exec.JobID == "" || exec.StreamToken == "" {
+		t.Fatalf("execute response: %+v, %v", exec, err)
+	}
+
+	cancelURL := st.baseURL + "/api/v1/submissions/" + exec.JobID
+	del := func(u string) (int, string) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete, u, nil)
+		if err != nil {
+			t.Fatalf("build DELETE: %v", err)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("DELETE: %v", err)
+		}
+		defer r.Body.Close() //nolint:errcheck // best-effort: test response body
+		b, _ := io.ReadAll(r.Body)
+		return r.StatusCode, string(b)
+	}
+
+	code, body := del(cancelURL)
+	if code != http.StatusUnauthorized || !strings.Contains(body, "invalid or missing stream_token") {
+		t.Errorf("no token: status = %d body = %s, want 401 invalid or missing stream_token", code, body)
+	}
+
+	// The worker may already have claimed the job, so 200 and 409 are both correct.
+	code, body = del(cancelURL + "?stream_token=" + url.QueryEscape(exec.StreamToken))
+	if code == http.StatusUnauthorized {
+		t.Errorf("valid token: status = 401, body = %s", body)
+	}
+	if code != http.StatusOK && code != http.StatusConflict {
+		t.Errorf("valid token: status = %d, want 200 or 409: %s", code, body)
+	}
 }
 
 // mockRunJudge stands in for go-judge. POST /run holds its canned single-test
@@ -467,6 +574,15 @@ func (f *fakePG) exec(sql string, params [][]byte) (rows [][][]byte, tag string,
 
 	case strings.HasPrefix(sql, "UPDATE submissions SET status = $2, verdict = $3,"):
 		return nil, f.updateNonTerminal(params, verdictColumns), nil
+
+	case strings.HasPrefix(sql, "UPDATE submissions SET status = 'failed', verdict = 'cancelled'"):
+		row, ok := f.rows[string(params[0])]
+		if !ok || string(row["status"]) != "queued" {
+			return nil, "UPDATE 0", nil
+		}
+		row["status"] = []byte("failed")
+		row["verdict"] = []byte("cancelled")
+		return nil, "UPDATE 1", nil
 
 	case strings.HasPrefix(sql, "INSERT INTO submission_test_results "):
 		return nil, "INSERT 0 1", nil

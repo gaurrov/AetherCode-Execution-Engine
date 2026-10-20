@@ -46,6 +46,14 @@ First open-source release.
 
 - (nothing yet)
 
+### Removed — BREAKING
+
+- `POST /api/v1/execute` no longer accepts `mode` or `problem_version_id`; the engine is a pure executor. Unknown fields are still ignored, so a leftover `"mode":"run"` is harmless.
+- `tests` is always required (at least one). Callers that used `mode: submit` must now send their own tests.
+- Idempotency keys are no longer scoped by mode: the same key and user returns the original job ID.
+- Every new job receives a `stream_token` (previously only unauthenticated run-mode jobs).
+- Unauthenticated `DELETE /api/v1/submissions/{id}` requires `stream_token`; the `404` for an unknown problem version is gone.
+
 ## Unreleased
 
 - Run mode accepts `time_limit_ms` and `memory_limit_kb`; runs also get a wall-clock limit (2x CPU + 1 s).

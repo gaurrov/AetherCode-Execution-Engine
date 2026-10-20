@@ -16,7 +16,7 @@ run_test() {
 
   resp=$(curl -sf -X POST "$BASE/api/v1/execute" \
     -H 'Content-Type: application/json' \
-    -d "{\"language\":\"$lang\",\"source_code\":\"$source\",\"mode\":\"run\",\"tests\":[{\"input\":\"\",\"expected_output\":\"$expected\"}]}" \
+    -d "{\"language\":\"$lang\",\"source_code\":\"$source\",\"tests\":[{\"input\":\"\",\"expected_output\":\"$expected\"}]}" \
     2>/dev/null)
   job_id=$(printf '%s' "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])" 2>/dev/null)
   stream_token=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('stream_token',''))" 2>/dev/null)
