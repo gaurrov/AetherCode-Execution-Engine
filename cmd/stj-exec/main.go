@@ -140,7 +140,7 @@ func main() {
 	bgWg.Add(1)
 	go func() {
 		defer bgWg.Done()
-		reapOrphans(ctx, pool, submitStream, runStream)
+		reapOrphans(ctx, pool, runStream)
 	}()
 
 	// Rate limiters
@@ -283,7 +283,7 @@ func parseLogLevel(s string) slog.Level {
 	}
 }
 
-func reapOrphans(ctx context.Context, pool *pgxpool.Pool, submitStream, runStream *queue.Stream) {
+func reapOrphans(ctx context.Context, pool *pgxpool.Pool, runStream *queue.Stream) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -299,18 +299,14 @@ func reapOrphans(ctx context.Context, pool *pgxpool.Pool, submitStream, runStrea
 				continue
 			}
 			for _, sub := range orphans {
-				target := runStream
-				if sub.Mode == "submit" {
-					target = submitStream
-				}
-				if err := target.Enqueue(ctx, sub.ID.String()); err != nil {
+				if err := runStream.Enqueue(ctx, sub.ID.String()); err != nil {
 					slog.Error("orphan reaper: re-enqueue failed", "submission_id", sub.ID, "err", err)
 					continue
 				}
 				if err := db.TouchSubmissionUpdatedAt(ctx, pool, sub.ID); err != nil {
 					slog.Error("orphan reaper: touch updated_at failed", "submission_id", sub.ID, "err", err)
 				}
-				slog.Warn("orphan reaper: re-enqueued stuck submission", "submission_id", sub.ID, "mode", sub.Mode)
+				slog.Warn("orphan reaper: re-enqueued stuck submission", "submission_id", sub.ID)
 			}
 		}
 	}

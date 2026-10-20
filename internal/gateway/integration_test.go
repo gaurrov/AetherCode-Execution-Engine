@@ -24,6 +24,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/auth"
+	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/db"
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/eventlog"
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/model"
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/queue"
@@ -230,6 +231,7 @@ type stack struct {
 	baseURL      string
 	releaseJudge func()
 	rdb          *goredis.Client
+	pool         *pgxpool.Pool
 }
 
 func startStack(t *testing.T, opts stackOptions) *stack {
@@ -273,7 +275,7 @@ func startStack(t *testing.T, opts stackOptions) *stack {
 		wg.Wait()
 	})
 
-	return &stack{baseURL: gw.URL, releaseJudge: releaseJudge, rdb: rdb}
+	return &stack{baseURL: gw.URL, releaseJudge: releaseJudge, rdb: rdb, pool: pool}
 }
 
 func TestExecute_AuthenticatedCallerGetsStreamToken(t *testing.T) {
@@ -604,4 +606,70 @@ func (f *fakePG) updateNonTerminal(params [][]byte, cols []string) string {
 		row[cols[i]] = params[i]
 	}
 	return "UPDATE 1"
+}
+
+// A job enqueued by an older release (submit stream, problem-bank tests, no
+// ac:tests: hash) must fail cleanly instead of hanging or panicking.
+func TestInFlightLegacySubmitJob_FailsCleanly(t *testing.T) {
+	st := startStack(t, stackOptions{})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	jobID := uuid.New()
+	if err := db.InsertSubmission(ctx, st.pool, &model.Submission{
+		ID:         jobID,
+		TenantID:   model.DefaultTenantID,
+		Mode:       "submit",
+		Language:   "python",
+		SourceCode: "print(3)",
+		Status:     model.StatusQueued,
+	}); err != nil {
+		t.Fatalf("insert submission: %v", err)
+	}
+	token, err := newStreamToken(ctx, st.rdb, jobID.String())
+	if err != nil {
+		t.Fatalf("stream token: %v", err)
+	}
+	if err := st.rdb.XAdd(ctx, &goredis.XAddArgs{
+		Stream: "ac:submissions:submit",
+		Values: map[string]any{"submission_id": jobID.String()},
+	}).Err(); err != nil {
+		t.Fatalf("XAdd: %v", err)
+	}
+
+	q := url.Values{"job_id": {jobID.String()}, "stream_token": {token}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, st.baseURL+"/api/v1/stream?"+q.Encode(), nil)
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	stream, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /stream: %v", err)
+	}
+	defer stream.Body.Close() //nolint:errcheck // best-effort: test response body
+	if stream.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(stream.Body)
+		t.Fatalf("GET /stream status = %d, want 200: %s", stream.StatusCode, b)
+	}
+
+	events := make(chan eventlog.Event, 16)
+	go readSSE(ctx, stream.Body, events)
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				t.Fatal("stream closed before VERDICT")
+			}
+			if evt.Type != eventlog.EventVerdict {
+				continue
+			}
+			data, _ := evt.Data.(map[string]any)
+			if got := data["verdict"]; got != "internal_error" {
+				t.Errorf("verdict = %v, want internal_error", got)
+			}
+			return
+		case <-ctx.Done():
+			t.Fatal("no VERDICT within 10s")
+		}
+	}
 }

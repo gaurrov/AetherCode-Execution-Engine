@@ -97,7 +97,6 @@ func (w *Worker) runWorker(ctx context.Context, consumer string) (panicked bool)
 type testData struct {
 	Input          string
 	ExpectedOutput string
-	IsSample       bool
 	CheckerType    string // "exact" | "token" | "float"; empty means exact
 }
 
@@ -159,8 +158,8 @@ func (w *Worker) process(ctx context.Context, submissionID string) error {
 		}
 	}()
 
-	// Load tests from the appropriate source
-	tests, limits, err := w.loadTests(jobCtx, sub)
+	// Load the job's tests and limits from Redis
+	tests, limits, err := w.loadTests(jobCtx, submissionID)
 	if err != nil {
 		return w.failSubmission(jobCtx, id, model.VerdictInternalError, fmt.Sprintf("load tests: %v", err), log)
 	}
@@ -263,29 +262,7 @@ func (w *Worker) process(ctx context.Context, submissionID string) error {
 		return fmt.Errorf("worker: write results+verdict: %w", err)
 	}
 
-	// Build verdict event data — filter hidden test output for submit mode
-	eventResults := make([]map[string]any, len(results))
-	isSubmitMode := sub.Mode == string(model.ModeSubmit)
-	for i, r := range results {
-		entry := map[string]any{
-			"test_index":   r.TestIndex,
-			"verdict":      r.Verdict,
-			"cpu_time_ns":  r.CPUTimeNs,
-			"memory_bytes": r.MemoryBytes,
-		}
-		// Only include stdout/stderr for sample tests in submit mode, or always in run mode
-		if !isSubmitMode || (i < len(tests) && tests[i].IsSample) {
-			entry["stdout_preview"] = db.Truncate(r.StdoutPreview, 256)
-			entry["stderr_preview"] = db.Truncate(r.StderrPreview, 256)
-		}
-		// Run-mode callers (an exam server grading with its own checker) need the
-		// complete output, not a preview; it is bounded by the sandbox output limit.
-		if !isSubmitMode {
-			entry["stdout"] = r.StdoutPreview
-			entry["stderr"] = r.StderrPreview
-		}
-		eventResults[i] = entry
-	}
+	eventResults := verdictResults(results)
 
 	effectiveCPU, effectiveMem := lang.Effective(limits)
 	verdictData := map[string]any{
@@ -309,38 +286,8 @@ func (w *Worker) process(ctx context.Context, submissionID string) error {
 	return nil
 }
 
-func (w *Worker) loadTests(ctx context.Context, sub *model.Submission) ([]testData, sandbox.RunLimits, error) {
-	if sub.Mode == string(model.ModeSubmit) && sub.ProblemVersionID != nil {
-		pv, err := db.GetProblemVersion(ctx, w.pool, *sub.ProblemVersionID)
-		if err != nil {
-			return nil, sandbox.RunLimits{}, err
-		}
-		tcs, err := db.GetTestCases(ctx, w.pool, *sub.ProblemVersionID)
-		if err != nil {
-			return nil, sandbox.RunLimits{}, err
-		}
-		tests := make([]testData, len(tcs))
-		for i, tc := range tcs {
-			tests[i] = testData{
-				Input:          tc.Input,
-				ExpectedOutput: tc.ExpectedOutput,
-				IsSample:       tc.IsSample,
-				CheckerType:    pv.CheckerType,
-			}
-		}
-		// Apply per-problem resource limits when the problem version specifies them.
-		var limits sandbox.RunLimits
-		if pv.CPULimitNs != nil && *pv.CPULimitNs > 0 {
-			limits.CPU = uint64(*pv.CPULimitNs) //nolint:gosec // non-negative DB value
-		}
-		if pv.MemoryLimit != nil && *pv.MemoryLimit > 0 {
-			limits.Memory = uint64(*pv.MemoryLimit) //nolint:gosec // non-negative DB value
-		}
-		return tests, limits, nil
-	}
-
-	// Run mode: tests and limits from Redis
-	set, err := w.pubsub.GetTests(ctx, sub.ID.String())
+func (w *Worker) loadTests(ctx context.Context, jobID string) ([]testData, sandbox.RunLimits, error) {
+	set, err := w.pubsub.GetTests(ctx, jobID)
 	if err != nil {
 		return nil, sandbox.RunLimits{}, err
 	}
@@ -349,11 +296,30 @@ func (w *Worker) loadTests(ctx context.Context, sub *model.Submission) ([]testDa
 		tests[i] = testData{
 			Input:          rt.Input,
 			ExpectedOutput: rt.ExpectedOutput,
-			IsSample:       true, // all client-supplied tests are visible
 			CheckerType:    set.Checker,
 		}
 	}
 	return tests, set.Limits, nil
+}
+
+// verdictResults builds the per-test entries of the VERDICT event. The caller
+// supplied the tests, so every test carries its full output (bounded by the
+// sandbox output limit) plus a 256-byte preview.
+func verdictResults(results []model.TestResult) []map[string]any {
+	out := make([]map[string]any, len(results))
+	for i, r := range results {
+		out[i] = map[string]any{
+			"test_index":     r.TestIndex,
+			"verdict":        r.Verdict,
+			"cpu_time_ns":    r.CPUTimeNs,
+			"memory_bytes":   r.MemoryBytes,
+			"stdout_preview": db.Truncate(r.StdoutPreview, 256),
+			"stderr_preview": db.Truncate(r.StderrPreview, 256),
+			"stdout":         r.StdoutPreview,
+			"stderr":         r.StderrPreview,
+		}
+	}
+	return out
 }
 
 // jobBudget is the worst-case time a job needs: compiling plus every test

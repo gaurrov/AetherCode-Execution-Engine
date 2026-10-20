@@ -66,7 +66,7 @@ go-judge sandbox (separate process / container)
 
 - Thin HTTP client wrapping go-judge's `/run` and `/version` REST endpoints.
 - Connection pool: 128 idle connections, per-request context deadlines, compression disabled (binary sandbox I/O benefits from no compression overhead).
-- `BuildCompileCmd`, `BuildRunCmd`, `BuildCacheSourceCmd` construct go-judge `Cmd` objects from the language config. All resource limits (CPU ns, memory bytes, proc count, clock limit = 2×CPU + 1s) are hardcoded per language with optional per-problem overrides for submit mode.
+- `BuildCompileCmd`, `BuildRunCmd`, `BuildCacheSourceCmd` construct go-judge `Cmd` objects from the language config. All resource limits (CPU ns, memory bytes, proc count, clock limit = 2×CPU + 1s) are hardcoded per language with optional per-request limit overrides carried with the job's test set.
 
 ### Auth (`internal/auth`)
 
@@ -153,6 +153,6 @@ See `deploy/k8s/` for manifests. Workers are stateless — scale the Deployment 
 
 - **Sandbox isolation**: user code executes inside go-judge's cgroup + Linux namespace + seccomp sandbox. The engine never executes user code directly.
 - **Tenant isolation**: every submission, problem, and test result is scoped to a `tenant_id` (UUID). The auth middleware resolves the caller's Zitadel org to a tenant. Row-Level Security policies in PostgreSQL enforce tenant boundaries at the DB layer when `AC_DATABASE_APP_URL` is configured.
-- **Auth**: OIDC JWT (Zitadel). Submit mode requires authentication. Run mode accepts unauthenticated callers (trusted backends) but issues a `stream_token` to gate the SSE stream.
+- **Auth**: OIDC JWT (Zitadel). Callers are unauthenticated trusted backends; every job gets a `stream_token` that gates its SSE stream.
 - **Rate limiting**: per-user sliding window (`AC_RATE_LIMIT_PER_MINUTE`) + optional per-IP window for unauthenticated callers. Admission control caps the Redis queue depth.
 - **Input validation**: source code ≤ 64 KB, body ≤ 64 MB, test data ≤ 8 MB per case, idempotency key ≤ 255 bytes.
