@@ -200,6 +200,7 @@ Submit code for execution.
 | `source_code` | string | Yes | Max 64 KB |
 | `tests` | array | Yes | Max 100 tests; each input/expected_output max 8 MB (request body max 64 MB) |
 | `checker` | string | No | `"exact"` (default; trailing whitespace and CRLF normalised), `"token"` (whitespace-separated tokens) or `"float"` (numeric tokens within an absolute 1e-6) |
+| `mode`, `problem_version_id` | — | Rejected | Legacy submit-mode fields are rejected with `400`; send `tests` instead. Only `"mode":"run"` is tolerated for compatibility |
 | `time_limit_ms` | integer | No | CPU time limit per test, 100–20000 (default: language default, 2 s) |
 | `memory_limit_kb` | integer | No | Memory limit per test, 16384–2097152 (default 512 MB; Java never below 256 MB) |
 | `idempotency_key` | string | No | Client-chosen key; same key + user returns the original job ID |

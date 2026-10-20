@@ -33,12 +33,12 @@ import (
 	"github.com/stjosephsplacements/AetherCode-Execution-Engine/internal/worker"
 )
 
-// These tests drive the full run-mode lifecycle in-process:
+// These tests drive the full execution lifecycle in-process:
 // POST /api/v1/execute → Redis enqueue → worker → go-judge → SSE VERDICT.
 // Redis is miniredis, go-judge is an httptest mock, and PostgreSQL is a tiny
 // wire-protocol fake, so neither Docker nor a live stack is needed.
 
-func TestExecuteAndStream_RunMode_Accepted(t *testing.T) {
+func TestExecuteAndStream_Accepted(t *testing.T) {
 	verdict := executeAndStream(t, runBody("3", ""))
 
 	if got := verdict["verdict"]; got != "accepted" {
@@ -49,7 +49,7 @@ func TestExecuteAndStream_RunMode_Accepted(t *testing.T) {
 	}
 }
 
-func TestExecuteAndStream_RunMode_WrongAnswer(t *testing.T) {
+func TestExecuteAndStream_WrongAnswer(t *testing.T) {
 	verdict := executeAndStream(t, runBody("4", ""))
 
 	if got := verdict["verdict"]; got != "wrong_answer" {
@@ -82,7 +82,7 @@ func runBody(expectedOutput, checker string) string {
 	return fmt.Sprintf(`{"language":"python","source_code":"print(1+2)",%s"tests":[{"input":"","expected_output":%q}]}`, c, expectedOutput)
 }
 
-// executeAndStream POSTs body (a run-mode request for a single python test) to /execute
+// executeAndStream POSTs body (a request for a single python test) to /execute
 // against a mock judge that always prints "3", streams it over SSE,
 // and returns the VERDICT event's data after checking the event sequence.
 func executeAndStream(t *testing.T, body string) map[string]any {
@@ -383,7 +383,7 @@ func mockRunJudge(t *testing.T, release <-chan struct{}) *httptest.Server {
 // --- fake PostgreSQL ---
 
 // fakePG speaks just enough of the PostgreSQL wire protocol to serve the
-// submission statements the gateway and worker issue on the run-mode path,
+// submission statements the gateway and worker issue on the execute path,
 // backed by an in-memory table. The pool uses QueryExecModeExec, so every
 // statement is a single Parse/Bind/Describe/Execute/Sync round trip with
 // text-format parameters and results.

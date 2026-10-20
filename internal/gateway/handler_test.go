@@ -341,7 +341,11 @@ func TestHandleExecute_RejectsUnknownChecker(t *testing.T) {
 	}
 }
 
-func TestHandleExecute_LegacySubmitPayloadRejected(t *testing.T) {
+const legacyModeError = "mode=submit and problem_version_id are no longer supported; send tests in the request body"
+
+// assertLegacyRejected posts body and checks for the legacy-field 400 with nothing enqueued.
+func assertLegacyRejected(t *testing.T, body string) {
+	t.Helper()
 	judgeSrv := fakeJudgeServer(t, "1.13.0")
 	judge := sandbox.NewClient(judgeSrv.URL, "test-token")
 	_, rdb := newTestRedis(t)
@@ -350,15 +354,40 @@ func TestHandleExecute_LegacySubmitPayloadRejected(t *testing.T) {
 	runStream := queue.NewStream(rdb, "ac:submissions:run", "workers")
 	h := NewHandler(nil, submitStream, runStream, queue.NewPubSub(rdb), judge, rdb, nil, nil, 5000, 8)
 
-	body := `{"language":"python","source_code":"print(1)","mode":"submit","problem_version_id":"0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"}`
 	rec := postExecute(h, body)
-	assertExecuteError(t, rec, http.StatusBadRequest, "at least one test is required")
+	assertExecuteError(t, rec, http.StatusBadRequest, legacyModeError)
 
 	for _, s := range []*queue.Stream{submitStream, runStream} {
 		if n, _ := rdb.XLen(context.Background(), s.StreamName()).Result(); n != 0 {
 			t.Errorf("XLen(%s) = %d, want 0", s.StreamName(), n)
 		}
 	}
+}
+
+func TestHandleExecute_LegacySubmitPayloadRejected(t *testing.T) {
+	assertLegacyRejected(t, `{"language":"python","source_code":"print(1)","mode":"submit","problem_version_id":"0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"}`)
+}
+
+func TestHandleExecute_LegacySubmitWithTestsRejected(t *testing.T) {
+	assertLegacyRejected(t, `{"language":"python","source_code":"print(1)","mode":"submit","problem_version_id":"0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b","tests":[{"input":"","expected_output":"1"}]}`)
+}
+
+func TestHandleExecute_ProblemVersionIDAloneRejected(t *testing.T) {
+	assertLegacyRejected(t, `{"language":"python","source_code":"print(1)","problem_version_id":"0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b","tests":[{"input":"","expected_output":"1"}]}`)
+}
+
+func TestHandleExecute_ModeRunIsNotRejectedAsLegacy(t *testing.T) {
+	judgeSrv := fakeJudgeServer(t, "1.13.0")
+	judge := sandbox.NewClient(judgeSrv.URL, "test-token")
+	_, rdb := newTestRedis(t)
+
+	submitStream := queue.NewStream(rdb, "ac:submissions:submit", "workers")
+	runStream := queue.NewStream(rdb, "ac:submissions:run", "workers")
+	h := NewHandler(nil, submitStream, runStream, queue.NewPubSub(rdb), judge, rdb, nil, nil, 5000, 8)
+
+	// Passes the legacy gate and fails on the next validation step.
+	rec := postExecute(h, `{"language":"python","source_code":"print(1)","mode":"run"}`)
+	assertExecuteError(t, rec, http.StatusBadRequest, "at least one test is required")
 }
 
 func TestHandleExecute_RequiresTests(t *testing.T) {

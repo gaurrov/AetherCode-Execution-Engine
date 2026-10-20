@@ -198,7 +198,7 @@ type TestData struct {
 	ExpectedOutput string
 }
 
-// TestSet is everything a run-mode job needs besides its source: the tests,
+// TestSet is everything a job needs besides its source: the tests,
 // the per-job resource limits and the output checker.
 type TestSet struct {
 	Tests   []TestData

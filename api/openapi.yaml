@@ -120,7 +120,7 @@ components:
         expected_output:
           type: string
           maxLength: 8388608
-          description: Expected stdout (max 8 MB). Comparison is whitespace-normalised.
+          description: Expected stdout (max 8 MB). Compared using the request's `checker` (default `exact`).
           example: "15\n"
 
     ExecuteRequest:
@@ -550,7 +550,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/ExecuteResponse"
         "400":
-          description: Invalid request (bad language, source too large, missing fields, etc.)
+          description: |
+            Invalid request (bad language, source too large, missing fields, etc.).
+            Legacy `mode` values other than `run`, or any `problem_version_id`, are rejected.
           content:
             application/json:
               schema:

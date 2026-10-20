@@ -44,20 +44,23 @@ First open-source release.
 
 ### Added
 
-- (nothing yet)
+- Per-request `checker` field on `POST /api/v1/execute` (`exact` | `token` | `float`).
 
 ### Removed — BREAKING
 
-- `POST /api/v1/execute` no longer accepts `mode` or `problem_version_id`; the engine is a pure executor. Unknown fields are still ignored, so a leftover `"mode":"run"` is harmless.
+- `POST /api/v1/execute` no longer accepts `mode` or `problem_version_id`; the engine is a pure executor. Requests with `mode` other than `run`, or with any `problem_version_id`, now get `400` instead of being silently ignored; a leftover `"mode":"run"` is tolerated.
 - `tests` is always required (at least one). Callers that used `mode: submit` must now send their own tests.
 - Idempotency keys are no longer scoped by mode: the same key and user returns the original job ID.
 - Every new job receives a `stream_token` (previously only unauthenticated run-mode jobs).
+- Per-test results now always include full `stdout`/`stderr` and previews (no hidden-test masking).
+- Migration 006 clears the idempotency key on later duplicates that reused a key across run/submit (the oldest row keeps it).
+- Upgrade order: move callers off `mode: submit` (send `tests`) before deploying this release.
 - Unauthenticated `DELETE /api/v1/submissions/{id}` requires `stream_token`; the `404` for an unknown problem version is gone.
 
-## Unreleased
+### Changed
 
-- Run mode accepts `time_limit_ms` and `memory_limit_kb`; runs also get a wall-clock limit (2x CPU + 1 s).
-- Run-mode VERDICT results include the complete `stdout`/`stderr`; test data up to 8 MB, output up to 8 MB.
+- Requests accept `time_limit_ms` and `memory_limit_kb`; runs also get a wall-clock limit (2x CPU + 1 s).
+- VERDICT results include the complete `stdout`/`stderr`; test data up to 8 MB, output up to 8 MB.
 - Job deadline grows to the worst case of its tests and limits instead of cutting off late tests.
 - Unauthenticated requests are no longer rate limited by IP; `AC_TRUST_PROXY` is removed.
 - Output comparison treats CRLF and lone CR as line breaks.

@@ -16,13 +16,13 @@ HTTP Gateway (Go net/http)
   │
   ▼
 Redis Streams (dual-consumer weighted fair queuing)
-  ├── ac:submissions:submit   (weight 3 — graded submit jobs)
-  └── ac:submissions:run      (weight 1 — scratch/run-code jobs)
+  ├── ac:submissions:submit   (weight 3 — legacy stream, drained only; no new jobs are enqueued here)
+  └── ac:submissions:run      (weight 1 — all new jobs)
   │
   ▼
 Worker Pool (N goroutines, configurable via AC_WORKER_COUNT)
   ├── Fetches submission from PostgreSQL
-  ├── Loads test cases (DB for submit / Redis for run)
+  ├── Loads the job's test cases from Redis
   ├── Compiles source (compiled langs) → go-judge file cache
   ├── Runs all tests in batched parallel /run calls (up to 32 per batch)
   └── Writes verdict + test results → PostgreSQL + publishes SSE event
@@ -39,8 +39,8 @@ go-judge sandbox (separate process / container)
 ### HTTP Gateway (`internal/gateway`)
 
 - Single `http.ServeMux` wrapped in middleware layers (outermost first): logging → CORS → OIDC auth → mux.
-- `HandleExecute` validates the request, inserts a submission row, stores run-mode test data in Redis, and enqueues the job ID atomically in a single Redis pipeline (`PrepareAndEnqueue`).
-- `HandleStream` replays stored events from a Redis list (`ac:events:<jobID>:log`) then subscribes to a Redis Pub/Sub channel for live events. Unauthenticated callers must present a short-lived `stream_token` (20-byte `crypto/rand`, TTL 30 min) issued at submit time.
+- `HandleExecute` validates the request, inserts a submission row, stores the job's test data in Redis, and enqueues the job ID atomically in a single Redis pipeline (`PrepareAndEnqueue`).
+- `HandleStream` replays stored events from a Redis list (`ac:events:<jobID>:log`) then subscribes to a Redis Pub/Sub channel for live events. Unauthenticated callers must present a short-lived `stream_token` (20-byte `crypto/rand`, TTL 30 min) issued when the job is created.
 - `HandleHealth` performs synchronous DB ping, go-judge `/version`, and Redis ping within a 5-second timeout.
 - Rate limiting: per-user sliding window (authenticated) + optional per-IP window (unauthenticated, `AC_RATE_LIMIT_UNAUTH_PER_MINUTE`).
 - Admission control: rejects submissions when the target stream exceeds `AC_ADMISSION_MAX_QUEUE_DEPTH`.
@@ -59,7 +59,7 @@ go-judge sandbox (separate process / container)
 - **Compile cache**: in-process LRU-like map keyed on SHA-256(language + source). Cache entries expire after `AC_COMPILE_CACHE_TTL` (default 60 s). Avoids recompiling identical source in repeated submissions.
 - **Batched execution**: up to 32 tests per `/run` call to go-judge (the `maxBatchSize` constant). go-judge executes the batch in parallel internally, reducing wall-clock time from N sequential round trips to ≈1.
 - **Source file caching**: for interpreted languages with >1 test, the source is uploaded once (`BuildCacheSourceCmd`) and subsequent test commands reference it by file ID.
-- **Verdict logic**: `JudgeOutput` normalises both expected and actual output (strip trailing whitespace per line, strip trailing blank lines, normalise CRLF→LF) before comparison.
+- **Verdict logic**: `JudgeOutput` compares actual and expected output using the request's `checker`: `exact` (default; strips trailing whitespace per line and trailing blank lines, normalises CRLF/CR to LF), `token` (whitespace-separated tokens) or `float` (numeric tokens within an absolute 1e-6).
 - **Graceful shutdown**: when the context is cancelled, workers finish their current job then exit. Main waits up to 120 seconds for all workers before proceeding with HTTP server shutdown.
 
 ### Sandbox Client (`internal/sandbox`)
@@ -152,7 +152,7 @@ See `deploy/k8s/` for manifests. Workers are stateless — scale the Deployment 
 ## Security model
 
 - **Sandbox isolation**: user code executes inside go-judge's cgroup + Linux namespace + seccomp sandbox. The engine never executes user code directly.
-- **Tenant isolation**: every submission, problem, and test result is scoped to a `tenant_id` (UUID). The auth middleware resolves the caller's Zitadel org to a tenant. Row-Level Security policies in PostgreSQL enforce tenant boundaries at the DB layer when `AC_DATABASE_APP_URL` is configured.
-- **Auth**: OIDC JWT (Zitadel). Callers are unauthenticated trusted backends; every job gets a `stream_token` that gates its SSE stream.
+- **Tenant isolation**: every submission and test result is scoped to a `tenant_id` (UUID). The auth middleware resolves the caller's Zitadel org to a tenant. Row-Level Security policies in PostgreSQL enforce tenant boundaries at the DB layer when `AC_DATABASE_APP_URL` is configured.
+- **Auth**: OIDC JWT (Zitadel). JWT auth is optional. When a valid token is presented, the engine enforces tenant and user ownership of jobs. Unauthenticated callers receive a `stream_token` with each job, which gates both SSE streaming and cancel.
 - **Rate limiting**: per-user sliding window (`AC_RATE_LIMIT_PER_MINUTE`) + optional per-IP window for unauthenticated callers. Admission control caps the Redis queue depth.
 - **Input validation**: source code ≤ 64 KB, body ≤ 64 MB, test data ≤ 8 MB per case, idempotency key ≤ 255 bytes.

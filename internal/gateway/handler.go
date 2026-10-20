@@ -114,6 +114,10 @@ type executeRequest struct {
 	MemoryLimitKb *uint64 `json:"memory_limit_kb"`
 	// Optional output checker: exact (default), token or float.
 	Checker string `json:"checker"`
+
+	// Mode and ProblemVersionID exist only to reject legacy submit-mode requests.
+	Mode             string  `json:"mode"`
+	ProblemVersionID *string `json:"problem_version_id"`
 }
 
 type testInput struct {
@@ -154,6 +158,11 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	var req executeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if (req.Mode != "" && req.Mode != "run") || (req.ProblemVersionID != nil && *req.ProblemVersionID != "") {
+		jsonError(w, "mode=submit and problem_version_id are no longer supported; send tests in the request body", http.StatusBadRequest)
 		return
 	}
 
