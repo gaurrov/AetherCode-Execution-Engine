@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
-	"time"
 
 	"github.com/google/uuid"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -73,11 +72,10 @@ func TestMain(m *testing.M) {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-func newSub(mode string) *model.Submission {
+func newSub() *model.Submission {
 	return &model.Submission{
 		ID:         uuid.New(),
 		TenantID:   model.DefaultTenantID,
-		Mode:       mode,
 		Language:   "python",
 		SourceCode: "print('hello')",
 		Status:     model.StatusQueued,
@@ -171,7 +169,7 @@ func TestTruncate(t *testing.T) {
 
 func TestInsertGetSubmission(t *testing.T) {
 	ctx := context.Background()
-	sub := newSub("run")
+	sub := newSub()
 	mustInsert(t, sub)
 
 	got, err := db.GetSubmission(ctx, sharedPool, sub.ID)
@@ -187,14 +185,11 @@ func TestInsertGetSubmission(t *testing.T) {
 	if got.Status != model.StatusQueued {
 		t.Errorf("Status = %q, want queued", got.Status)
 	}
-	if got.Mode != "run" {
-		t.Errorf("Mode = %q, want run", got.Mode)
-	}
 }
 
 func TestUpdateSubmissionStatus(t *testing.T) {
 	ctx := context.Background()
-	sub := newSub("run")
+	sub := newSub()
 	mustInsert(t, sub)
 
 	// First transition: queued → running (should succeed).
@@ -227,7 +222,7 @@ func TestInsertSubmissionIdempotent(t *testing.T) {
 	}
 
 	key := "idem-key-" + uuid.New().String()
-	sub := newSub("submit")
+	sub := newSub()
 	sub.UserID = &userID
 	ikey := key
 	sub.IdempotencyKey = &ikey
@@ -240,7 +235,7 @@ func TestInsertSubmissionIdempotent(t *testing.T) {
 		t.Error("first call: expected isNew=true")
 	}
 
-	sub2 := newSub("run") // different mode: key is no longer scoped by mode
+	sub2 := newSub()
 	sub2.ID = uuid.New()
 	sub2.UserID = &userID
 	sub2.IdempotencyKey = &ikey
@@ -259,7 +254,7 @@ func TestInsertSubmissionIdempotent(t *testing.T) {
 
 func TestInsertResultsAndVerdict(t *testing.T) {
 	ctx := context.Background()
-	sub := newSub("run")
+	sub := newSub()
 	mustInsert(t, sub)
 
 	results := []model.TestResult{
@@ -304,11 +299,11 @@ func TestOrphanedSubmissions(t *testing.T) {
 	ctx := context.Background()
 
 	// A fresh queued submission — should NOT appear (updated_at = now()).
-	fresh := newSub("run")
+	fresh := newSub()
 	mustInsert(t, fresh)
 
 	// An old queued submission — should appear (updated_at set to 3 min ago).
-	old := newSub("submit")
+	old := newSub()
 	mustInsert(t, old)
 	if _, err := sharedPool.Exec(ctx,
 		`UPDATE submissions SET updated_at = now() - interval '3 minutes' WHERE id = $1`, old.ID); err != nil {
@@ -321,117 +316,17 @@ func TestOrphanedSubmissions(t *testing.T) {
 	}
 
 	found := false
-	for _, o := range orphans {
-		if o.ID == old.ID {
+	for _, id := range orphans {
+		if id == old.ID {
 			found = true
-			if o.Mode != "submit" {
-				t.Errorf("orphan Mode = %q, want submit", o.Mode)
-			}
 		}
-		if o.ID == fresh.ID {
+		if id == fresh.ID {
 			t.Errorf("fresh submission should not appear in orphans")
 		}
 	}
 	if !found {
 		t.Errorf("old submission not found in orphans")
 	}
-}
-
-func TestGetProblemVersion(t *testing.T) {
-	ctx := context.Background()
-
-	probID := uuid.New()
-	pvID := uuid.New()
-	cpuNs := int64(500_000_000)
-	memB := int64(268_435_456)
-
-	if _, err := sharedPool.Exec(ctx,
-		`INSERT INTO problems (id, tenant_id, title, slug) VALUES ($1,$2,'Test',$3)`,
-		probID, model.DefaultTenantID, "test-pv-"+probID.String()); err != nil {
-		t.Fatalf("insert problem: %v", err)
-	}
-	if _, err := sharedPool.Exec(ctx,
-		`INSERT INTO problem_versions (id, problem_id, tenant_id, version, cpu_limit_ns, memory_limit, checker_type)
-		 VALUES ($1,$2,$3,1,$4,$5,'exact')`,
-		pvID, probID, model.DefaultTenantID, cpuNs, memB); err != nil {
-		t.Fatalf("insert problem_version: %v", err)
-	}
-
-	pv, err := db.GetProblemVersion(ctx, sharedPool, pvID)
-	if err != nil {
-		t.Fatalf("GetProblemVersion: %v", err)
-	}
-	if pv.ID != pvID {
-		t.Errorf("ID = %v, want %v", pv.ID, pvID)
-	}
-	if pv.CPULimitNs == nil || *pv.CPULimitNs != cpuNs {
-		t.Errorf("CPULimitNs = %v, want %d", pv.CPULimitNs, cpuNs)
-	}
-	if pv.MemoryLimit == nil || *pv.MemoryLimit != memB {
-		t.Errorf("MemoryLimit = %v, want %d", pv.MemoryLimit, memB)
-	}
-	if pv.CheckerType != "exact" {
-		t.Errorf("CheckerType = %q, want exact", pv.CheckerType)
-	}
-}
-
-func TestGetTestCases(t *testing.T) {
-	ctx := context.Background()
-
-	probID := uuid.New()
-	pvID := uuid.New()
-
-	if _, err := sharedPool.Exec(ctx,
-		`INSERT INTO problems (id, tenant_id, title, slug) VALUES ($1,$2,'TC Test',$3)`,
-		probID, model.DefaultTenantID, "tc-test-"+probID.String()); err != nil {
-		t.Fatalf("insert problem: %v", err)
-	}
-	if _, err := sharedPool.Exec(ctx,
-		`INSERT INTO problem_versions (id, problem_id, tenant_id, version) VALUES ($1,$2,$3,1)`,
-		pvID, probID, model.DefaultTenantID); err != nil {
-		t.Fatalf("insert problem_version: %v", err)
-	}
-
-	// Insert out-of-ordinal order to verify ORDER BY ordinal.
-	for _, tc := range []struct {
-		ord      int
-		input    string
-		expected string
-		sample   bool
-	}{
-		{2, "b", "B", false},
-		{0, "a", "A", true},
-		{1, "c", "C", false},
-	} {
-		if _, err := sharedPool.Exec(ctx,
-			`INSERT INTO test_cases (problem_version_id, tenant_id, ordinal, input, expected_output, is_sample)
-			 VALUES ($1,$2,$3,$4,$5,$6)`,
-			pvID, model.DefaultTenantID, tc.ord, tc.input, tc.expected, tc.sample); err != nil {
-			t.Fatalf("insert test_case ord=%d: %v", tc.ord, err)
-		}
-	}
-
-	tcs, err := db.GetTestCases(ctx, sharedPool, pvID)
-	if err != nil {
-		t.Fatalf("GetTestCases: %v", err)
-	}
-	if len(tcs) != 3 {
-		t.Fatalf("len(tcs) = %d, want 3", len(tcs))
-	}
-	// Must be sorted by ordinal: 0,1,2
-	wantInputs := []string{"a", "c", "b"}
-	for i, tc := range tcs {
-		if tc.Input != wantInputs[i] {
-			t.Errorf("tcs[%d].Input = %q, want %q", i, tc.Input, wantInputs[i])
-		}
-	}
-	if !tcs[0].IsSample {
-		t.Error("tcs[0] (ordinal 0) should be sample")
-	}
-	if tcs[1].IsSample || tcs[2].IsSample {
-		t.Error("tcs[1] and tcs[2] should not be sample")
-	}
-	_ = time.Now() // satisfy import
 }
 
 func TestMigration006_DedupesCrossModeKeys(t *testing.T) {

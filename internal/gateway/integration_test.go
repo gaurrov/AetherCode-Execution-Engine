@@ -397,7 +397,7 @@ var submissionColumns = []struct {
 	oid  uint32
 }{
 	{"id", pgtype.UUIDOID}, {"tenant_id", pgtype.UUIDOID}, {"user_id", pgtype.UUIDOID},
-	{"problem_version_id", pgtype.UUIDOID}, {"idempotency_key", pgtype.TextOID}, {"mode", pgtype.TextOID},
+	{"idempotency_key", pgtype.TextOID},
 	{"language", pgtype.TextOID}, {"source_code", pgtype.TextOID}, {"status", pgtype.TextOID},
 	{"verdict", pgtype.TextOID}, {"compile_stderr", pgtype.TextOID}, {"cpu_time_ns", pgtype.Int8OID},
 	{"memory_bytes", pgtype.Int8OID}, {"test_count", pgtype.Int4OID}, {"tests_passed", pgtype.Int4OID},
@@ -406,7 +406,7 @@ var submissionColumns = []struct {
 
 // Columns bound by each write, in $1..$n order.
 var (
-	insertColumns  = []string{"id", "tenant_id", "user_id", "problem_version_id", "idempotency_key", "mode", "language", "source_code", "status"}
+	insertColumns  = []string{"id", "tenant_id", "user_id", "idempotency_key", "language", "source_code", "status"}
 	verdictColumns = []string{"id", "status", "verdict", "compile_stderr", "cpu_time_ns", "memory_bytes", "test_count", "tests_passed"}
 )
 
@@ -619,7 +619,6 @@ func TestInFlightLegacySubmitJob_FailsCleanly(t *testing.T) {
 	if err := db.InsertSubmission(ctx, st.pool, &model.Submission{
 		ID:         jobID,
 		TenantID:   model.DefaultTenantID,
-		Mode:       "submit",
 		Language:   "python",
 		SourceCode: "print(3)",
 		Status:     model.StatusQueued,

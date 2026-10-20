@@ -298,15 +298,15 @@ func reapOrphans(ctx context.Context, pool *pgxpool.Pool, runStream *queue.Strea
 				}
 				continue
 			}
-			for _, sub := range orphans {
-				if err := runStream.Enqueue(ctx, sub.ID.String()); err != nil {
-					slog.Error("orphan reaper: re-enqueue failed", "submission_id", sub.ID, "err", err)
+			for _, id := range orphans {
+				if err := runStream.Enqueue(ctx, id.String()); err != nil {
+					slog.Error("orphan reaper: re-enqueue failed", "submission_id", id, "err", err)
 					continue
 				}
-				if err := db.TouchSubmissionUpdatedAt(ctx, pool, sub.ID); err != nil {
-					slog.Error("orphan reaper: touch updated_at failed", "submission_id", sub.ID, "err", err)
+				if err := db.TouchSubmissionUpdatedAt(ctx, pool, id); err != nil {
+					slog.Error("orphan reaper: touch updated_at failed", "submission_id", id, "err", err)
 				}
-				slog.Warn("orphan reaper: re-enqueued stuck submission", "submission_id", sub.ID)
+				slog.Warn("orphan reaper: re-enqueued stuck submission", "submission_id", id)
 			}
 		}
 	}

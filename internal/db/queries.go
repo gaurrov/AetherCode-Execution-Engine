@@ -13,10 +13,10 @@ import (
 
 func InsertSubmission(ctx context.Context, pool *pgxpool.Pool, sub *model.Submission) error {
 	_, err := pool.Exec(ctx, `
-		INSERT INTO submissions (id, tenant_id, user_id, problem_version_id, idempotency_key, mode,
+		INSERT INTO submissions (id, tenant_id, user_id, idempotency_key,
 		                         language, source_code, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())`,
-		sub.ID, sub.TenantID, sub.UserID, sub.ProblemVersionID, sub.IdempotencyKey, sub.Mode,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())`,
+		sub.ID, sub.TenantID, sub.UserID, sub.IdempotencyKey,
 		sub.Language, sub.SourceCode, sub.Status)
 	if err != nil {
 		return fmt.Errorf("db: insert submission: %w", err)
@@ -29,13 +29,13 @@ func InsertSubmission(ctx context.Context, pool *pgxpool.Pool, sub *model.Submis
 func InsertSubmissionIdempotent(ctx context.Context, pool *pgxpool.Pool, sub *model.Submission) (uuid.UUID, bool, error) {
 	var insertedID *uuid.UUID
 	err := pool.QueryRow(ctx, `
-		INSERT INTO submissions (id, tenant_id, user_id, problem_version_id, idempotency_key, mode,
+		INSERT INTO submissions (id, tenant_id, user_id, idempotency_key,
 		                         language, source_code, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
 		ON CONFLICT (tenant_id, user_id, idempotency_key) WHERE idempotency_key IS NOT NULL
 		DO NOTHING
 		RETURNING id`,
-		sub.ID, sub.TenantID, sub.UserID, sub.ProblemVersionID, sub.IdempotencyKey, sub.Mode,
+		sub.ID, sub.TenantID, sub.UserID, sub.IdempotencyKey,
 		sub.Language, sub.SourceCode, sub.Status).Scan(&insertedID)
 
 	if err == pgx.ErrNoRows {
@@ -62,12 +62,12 @@ func GetSubmission(ctx context.Context, pool *pgxpool.Pool, id uuid.UUID) (*mode
 	var cpuTimeNs, memoryBytes *int64
 	var testCount, testsPassed *int
 	err := pool.QueryRow(ctx, `
-		SELECT id, tenant_id, user_id, problem_version_id, idempotency_key, mode,
+		SELECT id, tenant_id, user_id, idempotency_key,
 		       language, source_code, status, verdict,
 		       compile_stderr, cpu_time_ns, memory_bytes,
 		       test_count, tests_passed, created_at, updated_at
 		FROM submissions WHERE id = $1`, id).Scan(
-		&sub.ID, &sub.TenantID, &sub.UserID, &sub.ProblemVersionID, &sub.IdempotencyKey, &sub.Mode,
+		&sub.ID, &sub.TenantID, &sub.UserID, &sub.IdempotencyKey,
 		&sub.Language, &sub.SourceCode, &sub.Status, &verdict,
 		&compileStderr, &cpuTimeNs, &memoryBytes,
 		&testCount, &testsPassed, &sub.CreatedAt, &sub.UpdatedAt)
@@ -229,15 +229,10 @@ func InsertResultsAndVerdict(ctx context.Context, pool *pgxpool.Pool, submission
 	return firstErr
 }
 
-type OrphanedSubmission struct {
-	ID   uuid.UUID
-	Mode string
-}
-
 // OrphanedSubmissions returns submissions stuck in queued state for re-enqueuing.
-func OrphanedSubmissions(ctx context.Context, pool *pgxpool.Pool) ([]OrphanedSubmission, error) {
+func OrphanedSubmissions(ctx context.Context, pool *pgxpool.Pool) ([]uuid.UUID, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT id, mode FROM submissions
+		SELECT id FROM submissions
 		WHERE status = 'queued' AND updated_at < now() - interval '2 minutes'
 		ORDER BY updated_at
 		LIMIT 100`)
@@ -246,15 +241,15 @@ func OrphanedSubmissions(ctx context.Context, pool *pgxpool.Pool) ([]OrphanedSub
 	}
 	defer rows.Close()
 
-	var subs []OrphanedSubmission
+	var ids []uuid.UUID
 	for rows.Next() {
-		var s OrphanedSubmission
-		if err := rows.Scan(&s.ID, &s.Mode); err != nil {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		subs = append(subs, s)
+		ids = append(ids, id)
 	}
-	return subs, rows.Err()
+	return ids, rows.Err()
 }
 
 // CancelSubmission transitions a queued submission to failed/cancelled.

@@ -196,7 +196,7 @@ func TestPrepareAndEnqueue_NoTests(t *testing.T) {
 	ctx := context.Background()
 	ps := NewPubSub(rdb)
 
-	// Submit-mode: no tests passed, event + stream entry only
+	// No tests passed, event + stream entry only
 	evt := eventlog.New("job-notests", eventlog.EventQueued, nil)
 	if err := ps.PrepareAndEnqueue(ctx, "job-notests", TestSet{}, evt, "ac:stream:s"); err != nil {
 		t.Fatalf("PrepareAndEnqueue with no tests: %v", err)

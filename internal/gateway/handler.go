@@ -253,7 +253,6 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	sub := &model.Submission{
 		ID:         id,
 		TenantID:   model.DefaultTenantID,
-		Mode:       string(model.ModeRun), // column is dropped in a later change; InsertSubmission still binds it
 		Language:   req.Language,
 		SourceCode: req.SourceCode,
 		Status:     model.StatusQueued,
