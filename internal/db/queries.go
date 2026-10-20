@@ -32,7 +32,7 @@ func InsertSubmissionIdempotent(ctx context.Context, pool *pgxpool.Pool, sub *mo
 		INSERT INTO submissions (id, tenant_id, user_id, problem_version_id, idempotency_key, mode,
 		                         language, source_code, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())
-		ON CONFLICT (tenant_id, user_id, idempotency_key, mode) WHERE idempotency_key IS NOT NULL
+		ON CONFLICT (tenant_id, user_id, idempotency_key) WHERE idempotency_key IS NOT NULL
 		DO NOTHING
 		RETURNING id`,
 		sub.ID, sub.TenantID, sub.UserID, sub.ProblemVersionID, sub.IdempotencyKey, sub.Mode,
@@ -43,8 +43,8 @@ func InsertSubmissionIdempotent(ctx context.Context, pool *pgxpool.Pool, sub *mo
 		var existingID uuid.UUID
 		err2 := pool.QueryRow(ctx, `
 			SELECT id FROM submissions
-			WHERE tenant_id = $1 AND user_id = $2 AND idempotency_key = $3 AND mode = $4`,
-			sub.TenantID, sub.UserID, sub.IdempotencyKey, sub.Mode).Scan(&existingID)
+			WHERE tenant_id = $1 AND user_id = $2 AND idempotency_key = $3`,
+			sub.TenantID, sub.UserID, sub.IdempotencyKey).Scan(&existingID)
 		if err2 != nil {
 			return uuid.Nil, false, fmt.Errorf("db: idempotent lookup: %w", err2)
 		}
