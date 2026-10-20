@@ -340,20 +340,20 @@ func (w *Worker) loadTests(ctx context.Context, sub *model.Submission) ([]testDa
 	}
 
 	// Run mode: tests and limits from Redis
-	redisTests, limits, err := w.pubsub.GetTests(ctx, sub.ID.String())
+	set, err := w.pubsub.GetTests(ctx, sub.ID.String())
 	if err != nil {
 		return nil, sandbox.RunLimits{}, err
 	}
-	tests := make([]testData, len(redisTests))
-	for i, rt := range redisTests {
+	tests := make([]testData, len(set.Tests))
+	for i, rt := range set.Tests {
 		tests[i] = testData{
 			Input:          rt.Input,
 			ExpectedOutput: rt.ExpectedOutput,
 			IsSample:       true, // all client-supplied tests are visible
-			CheckerType:    "exact",
+			CheckerType:    set.Checker,
 		}
 	}
-	return tests, limits, nil
+	return tests, set.Limits, nil
 }
 
 // jobBudget is the worst-case time a job needs: compiling plus every test

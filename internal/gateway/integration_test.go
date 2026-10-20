@@ -32,7 +32,7 @@ import (
 // wire-protocol fake, so neither Docker nor a live stack is needed.
 
 func TestExecuteAndStream_RunMode_Accepted(t *testing.T) {
-	verdict := executeAndStream(t, "3")
+	verdict := executeAndStream(t, runBody("3", ""))
 
 	if got := verdict["verdict"]; got != "accepted" {
 		t.Errorf("verdict = %v, want accepted", got)
@@ -43,7 +43,7 @@ func TestExecuteAndStream_RunMode_Accepted(t *testing.T) {
 }
 
 func TestExecuteAndStream_RunMode_WrongAnswer(t *testing.T) {
-	verdict := executeAndStream(t, "4")
+	verdict := executeAndStream(t, runBody("4", ""))
 
 	if got := verdict["verdict"]; got != "wrong_answer" {
 		t.Errorf("verdict = %v, want wrong_answer", got)
@@ -53,14 +53,35 @@ func TestExecuteAndStream_RunMode_WrongAnswer(t *testing.T) {
 	}
 }
 
-// executeAndStream submits a single-test python run job whose expected output
-// is expectedOutput (the mock judge always prints "3"), streams it over SSE,
+func TestExecuteAndStream_FloatChecker(t *testing.T) {
+	// The mock judge prints "3": within 1e-6 of 3.0000001, but not an exact match.
+	verdict := executeAndStream(t, runBody("3.0000001", "float"))
+	if got := verdict["verdict"]; got != "accepted" {
+		t.Errorf("float checker: verdict = %v, want accepted", got)
+	}
+
+	verdict = executeAndStream(t, runBody("3.0000001", ""))
+	if got := verdict["verdict"]; got != "wrong_answer" {
+		t.Errorf("default checker: verdict = %v, want wrong_answer", got)
+	}
+}
+
+// runBody builds a single-test python run request; an empty checker omits the field.
+func runBody(expectedOutput, checker string) string {
+	c := ""
+	if checker != "" {
+		c = fmt.Sprintf(`"checker":%q,`, checker)
+	}
+	return fmt.Sprintf(`{"language":"python","source_code":"print(1+2)","mode":"run",%s"tests":[{"input":"","expected_output":%q}]}`, c, expectedOutput)
+}
+
+// executeAndStream POSTs body (a run-mode request for a single python test) to /execute
+// against a mock judge that always prints "3", streams it over SSE,
 // and returns the VERDICT event's data after checking the event sequence.
-func executeAndStream(t *testing.T, expectedOutput string) map[string]any {
+func executeAndStream(t *testing.T, body string) map[string]any {
 	t.Helper()
 	baseURL, releaseJudge := startExecutionStack(t)
 
-	body := fmt.Sprintf(`{"language":"python","source_code":"print(1+2)","mode":"run","tests":[{"input":"","expected_output":%q}]}`, expectedOutput)
 	resp, err := http.Post(baseURL+"/api/v1/execute", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST /execute: %v", err)

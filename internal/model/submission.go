@@ -75,3 +75,20 @@ type TestResult struct {
 	StdoutPreview string
 	StderrPreview string
 }
+
+// Output checker names accepted in execute requests.
+const (
+	CheckerExact = "exact"
+	CheckerToken = "token"
+	CheckerFloat = "float"
+)
+
+// ValidChecker reports whether s names a supported checker. The empty string
+// is valid and means exact.
+func ValidChecker(s string) bool {
+	switch s {
+	case "", CheckerExact, CheckerToken, CheckerFloat:
+		return true
+	}
+	return false
+}

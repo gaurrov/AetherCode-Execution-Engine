@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -308,5 +309,34 @@ func TestHandleCancel_InvalidID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleExecute_RejectsUnknownChecker(t *testing.T) {
+	judgeSrv := fakeJudgeServer(t, "1.13.0")
+	judge := sandbox.NewClient(judgeSrv.URL, "test-token")
+	_, rdb := newTestRedis(t)
+
+	submitStream := queue.NewStream(rdb, "ac:submissions:submit", "workers")
+	runStream := queue.NewStream(rdb, "ac:submissions:run", "workers")
+	h := NewHandler(nil, submitStream, runStream, queue.NewPubSub(rdb), judge, rdb, nil, nil, 5000, 8)
+
+	body := `{"language":"python","source_code":"print(1)","checker":"regex","tests":[{"input":"","expected_output":"1"}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/execute", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	h.HandleExecute(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if resp.Error != "checker must be one of: exact, token, float" {
+		t.Errorf("error = %q", resp.Error)
 	}
 }

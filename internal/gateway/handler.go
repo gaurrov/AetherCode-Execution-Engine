@@ -114,6 +114,8 @@ type executeRequest struct {
 	// Optional run-mode limits; omitted means the language defaults.
 	TimeLimitMs   *uint64 `json:"time_limit_ms"`
 	MemoryLimitKb *uint64 `json:"memory_limit_kb"`
+	// Optional run-mode output checker: exact (default), token or float.
+	Checker string `json:"checker"`
 }
 
 type testInput struct {
@@ -220,6 +222,10 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 				jsonError(w, "test input/output exceeds 8MB", http.StatusBadRequest)
 				return
 			}
+		}
+		if !model.ValidChecker(req.Checker) {
+			jsonError(w, "checker must be one of: exact, token, float", http.StatusBadRequest)
+			return
 		}
 	}
 
@@ -345,7 +351,7 @@ func (h *Handler) HandleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	queuedEvt := eventlog.New(jobID.String(), eventlog.EventQueued, nil)
-	if err := h.pubsub.PrepareAndEnqueue(ctx, jobID.String(), tests, limits, queuedEvt, targetStream.StreamName()); err != nil {
+	if err := h.pubsub.PrepareAndEnqueue(ctx, jobID.String(), queue.TestSet{Tests: tests, Limits: limits, Checker: req.Checker}, queuedEvt, targetStream.StreamName()); err != nil {
 		slog.Error("enqueue failed", "submission_id", jobID, "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return

@@ -21,12 +21,13 @@ func TestPrepareAndEnqueue_AtomicPipeline(t *testing.T) {
 	limits := sandbox.RunLimits{CPU: 2_000_000_000, Memory: 256 << 20}
 	evt := eventlog.New("job-abc", eventlog.EventQueued, nil)
 
-	if err := ps.PrepareAndEnqueue(ctx, "job-abc", tests, limits, evt, "ac:test:stream"); err != nil {
+	if err := ps.PrepareAndEnqueue(ctx, "job-abc", TestSet{Tests: tests, Limits: limits}, evt, "ac:test:stream"); err != nil {
 		t.Fatalf("PrepareAndEnqueue: %v", err)
 	}
 
 	// Tests should be stored in Redis
-	gotTests, gotLimits, err := ps.GetTests(ctx, "job-abc")
+	gotSet, err := ps.GetTests(ctx, "job-abc")
+	gotTests, gotLimits := gotSet.Tests, gotSet.Limits
 	if err != nil {
 		t.Fatalf("GetTests: %v", err)
 	}
@@ -79,11 +80,12 @@ func TestGetTests_RoundTrip(t *testing.T) {
 		{Input: "hello", ExpectedOutput: "world"},
 	}
 	evt := eventlog.New("job-xyz", eventlog.EventQueued, nil)
-	if err := ps.PrepareAndEnqueue(ctx, "job-xyz", tests, sandbox.RunLimits{}, evt, "ac:stream:x"); err != nil {
+	if err := ps.PrepareAndEnqueue(ctx, "job-xyz", TestSet{Tests: tests}, evt, "ac:stream:x"); err != nil {
 		t.Fatalf("PrepareAndEnqueue: %v", err)
 	}
 
-	got, _, err := ps.GetTests(ctx, "job-xyz")
+	gotSet, err := ps.GetTests(ctx, "job-xyz")
+	got := gotSet.Tests
 	if err != nil {
 		t.Fatalf("GetTests: %v", err)
 	}
@@ -98,11 +100,12 @@ func TestGetTests_ZeroLimitsPreservesDefault(t *testing.T) {
 	ps := NewPubSub(rdb)
 
 	evt := eventlog.New("job-lim", eventlog.EventQueued, nil)
-	if err := ps.PrepareAndEnqueue(ctx, "job-lim", []TestData{{Input: "x", ExpectedOutput: "y"}}, sandbox.RunLimits{}, evt, "s"); err != nil {
+	if err := ps.PrepareAndEnqueue(ctx, "job-lim", TestSet{Tests: []TestData{{Input: "x", ExpectedOutput: "y"}}}, evt, "s"); err != nil {
 		t.Fatalf("PrepareAndEnqueue: %v", err)
 	}
 
-	_, limits, err := ps.GetTests(ctx, "job-lim")
+	limSet, err := ps.GetTests(ctx, "job-lim")
+	limits := limSet.Limits
 	if err != nil {
 		t.Fatalf("GetTests: %v", err)
 	}
@@ -195,7 +198,7 @@ func TestPrepareAndEnqueue_NoTests(t *testing.T) {
 
 	// Submit-mode: no tests passed, event + stream entry only
 	evt := eventlog.New("job-notests", eventlog.EventQueued, nil)
-	if err := ps.PrepareAndEnqueue(ctx, "job-notests", nil, sandbox.RunLimits{}, evt, "ac:stream:s"); err != nil {
+	if err := ps.PrepareAndEnqueue(ctx, "job-notests", TestSet{}, evt, "ac:stream:s"); err != nil {
 		t.Fatalf("PrepareAndEnqueue with no tests: %v", err)
 	}
 
@@ -244,7 +247,7 @@ func TestPrepareAndEnqueue_MultipleEnqueues_IndependentStreams(t *testing.T) {
 	for i, stream := range []string{"ac:stream:a", "ac:stream:b", "ac:stream:c"} {
 		jobID := "job-multi-" + string(rune('0'+i))
 		evt := eventlog.New(jobID, eventlog.EventQueued, nil)
-		if err := ps.PrepareAndEnqueue(ctx, jobID, nil, sandbox.RunLimits{}, evt, stream); err != nil {
+		if err := ps.PrepareAndEnqueue(ctx, jobID, TestSet{}, evt, stream); err != nil {
 			t.Fatalf("PrepareAndEnqueue[%d]: %v", i, err)
 		}
 	}
@@ -329,5 +332,52 @@ func TestStream_Consume_SingleMessage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for message")
+	}
+}
+
+func TestPrepareAndGetTests_RoundTripsChecker(t *testing.T) {
+	_, rdb := newTestRedis(t)
+	ctx := context.Background()
+	ps := NewPubSub(rdb)
+
+	set := TestSet{
+		Tests:   []TestData{{Input: "1", ExpectedOutput: "1.0"}, {Input: "2", ExpectedOutput: "2.0"}},
+		Limits:  sandbox.RunLimits{CPU: 2_000_000_000, Memory: 256 << 20},
+		Checker: "float",
+	}
+	evt := eventlog.New("job-chk", eventlog.EventQueued, nil)
+	if err := ps.PrepareAndEnqueue(ctx, "job-chk", set, evt, "ac:stream:c"); err != nil {
+		t.Fatalf("PrepareAndEnqueue: %v", err)
+	}
+
+	got, err := ps.GetTests(ctx, "job-chk")
+	if err != nil {
+		t.Fatalf("GetTests: %v", err)
+	}
+	if got.Checker != "float" {
+		t.Errorf("Checker = %q, want float", got.Checker)
+	}
+	if got.Limits != set.Limits {
+		t.Errorf("Limits = %+v, want %+v", got.Limits, set.Limits)
+	}
+	if len(got.Tests) != 2 || got.Tests[0] != set.Tests[0] || got.Tests[1] != set.Tests[1] {
+		t.Errorf("Tests = %+v, want %+v", got.Tests, set.Tests)
+	}
+}
+
+func TestGetTests_MissingCheckerIsEmpty(t *testing.T) {
+	_, rdb := newTestRedis(t)
+	ctx := context.Background()
+	ps := NewPubSub(rdb)
+
+	if err := rdb.HSet(ctx, "ac:tests:job-old", "count", 1, "0:input", "a", "0:expected", "b").Err(); err != nil {
+		t.Fatalf("HSet: %v", err)
+	}
+	got, err := ps.GetTests(ctx, "job-old")
+	if err != nil {
+		t.Fatalf("GetTests: %v", err)
+	}
+	if got.Checker != "" {
+		t.Errorf("Checker = %q, want empty", got.Checker)
 	}
 }

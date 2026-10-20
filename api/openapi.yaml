@@ -68,6 +68,19 @@ components:
         - typescript
       description: Identifier of the programming language / runtime.
 
+    Checker:
+      type: string
+      enum:
+        - exact
+        - token
+        - float
+      default: exact
+      description: |
+        How a test's output is compared with `expected_output`.
+        `exact` — equal after normalising trailing whitespace and CRLF line endings.
+        `token` — equal as whitespace-separated tokens.
+        `float` — tokens compared as numbers with an absolute tolerance of 1e-6; non-numeric tokens must match exactly.
+
     Mode:
       type: string
       enum:
@@ -158,6 +171,10 @@ components:
             $ref: "#/components/schemas/TestInput"
           description: |
             Required when `mode=run`. Caller-supplied test cases. Maximum 100 tests.
+        checker:
+          $ref: "#/components/schemas/Checker"
+          description: |
+            Run mode only. Output comparison used for every test. Omit for `exact`.
         time_limit_ms:
           type: integer
           format: int64

@@ -16,7 +16,7 @@ import (
 
 // PrepareAndEnqueue stores tests, publishes the QUEUED event, and enqueues
 // the submission in a single Redis pipeline (1 round trip instead of 3).
-func (p *PubSub) PrepareAndEnqueue(ctx context.Context, jobID string, tests []TestData, limits sandbox.RunLimits, evt eventlog.Event, streamKey string) error {
+func (p *PubSub) PrepareAndEnqueue(ctx context.Context, jobID string, set TestSet, evt eventlog.Event, streamKey string) error {
 	data, err := json.Marshal(evt)
 	if err != nil {
 		return fmt.Errorf("pubsub: marshal event: %w", err)
@@ -24,10 +24,10 @@ func (p *PubSub) PrepareAndEnqueue(ctx context.Context, jobID string, tests []Te
 
 	pipe := p.rdb.Pipeline()
 
-	if len(tests) > 0 {
+	if len(set.Tests) > 0 {
 		key := "ac:tests:" + jobID
-		pipe.HSet(ctx, key, "count", len(tests), "cpu_ns", limits.CPU, "mem_bytes", limits.Memory)
-		for i, t := range tests {
+		pipe.HSet(ctx, key, "count", len(set.Tests), "cpu_ns", set.Limits.CPU, "mem_bytes", set.Limits.Memory, "checker", set.Checker)
+		for i, t := range set.Tests {
 			prefix := strconv.Itoa(i)
 			pipe.HSet(ctx, key, prefix+":input", t.Input)
 			pipe.HSet(ctx, key, prefix+":expected", t.ExpectedOutput)
@@ -152,25 +152,25 @@ func (p *PubSub) Subscribe(ctx context.Context, jobID string) <-chan eventlog.Ev
 	return ch
 }
 
-// GetTests retrieves test cases and the job's run limits from Redis in a single round trip.
-func (p *PubSub) GetTests(ctx context.Context, jobID string) ([]TestData, sandbox.RunLimits, error) {
+// GetTests retrieves test cases, run limits and checker from Redis in a single round trip.
+func (p *PubSub) GetTests(ctx context.Context, jobID string) (TestSet, error) {
 	key := "ac:tests:" + jobID
 	fields, err := p.rdb.HGetAll(ctx, key).Result()
 	if err != nil {
-		return nil, sandbox.RunLimits{}, fmt.Errorf("pubsub: get tests: %w", err)
+		return TestSet{}, fmt.Errorf("pubsub: get tests: %w", err)
 	}
 
 	countStr, ok := fields["count"]
 	if !ok {
-		return nil, sandbox.RunLimits{}, fmt.Errorf("pubsub: no test count in %s", key)
+		return TestSet{}, fmt.Errorf("pubsub: no test count in %s", key)
 	}
 
 	count, err := strconv.Atoi(countStr)
 	if err != nil {
-		return nil, sandbox.RunLimits{}, fmt.Errorf("pubsub: corrupt test count %q in %s", countStr, key)
+		return TestSet{}, fmt.Errorf("pubsub: corrupt test count %q in %s", countStr, key)
 	}
 	if count < 0 || count > 10000 {
-		return nil, sandbox.RunLimits{}, fmt.Errorf("pubsub: invalid test count %d in %s", count, key)
+		return TestSet{}, fmt.Errorf("pubsub: invalid test count %d in %s", count, key)
 	}
 
 	tests := make([]TestData, count)
@@ -189,10 +189,19 @@ func (p *PubSub) GetTests(ctx context.Context, jobID string) ([]TestData, sandbo
 	if v := fields["mem_bytes"]; v != "" {
 		limits.Memory, _ = strconv.ParseUint(v, 10, 64)
 	}
-	return tests, limits, nil
+	// Absent on jobs enqueued before the checker existed: empty means exact.
+	return TestSet{Tests: tests, Limits: limits, Checker: fields["checker"]}, nil
 }
 
 type TestData struct {
 	Input          string
 	ExpectedOutput string
+}
+
+// TestSet is everything a run-mode job needs besides its source: the tests,
+// the per-job resource limits and the output checker.
+type TestSet struct {
+	Tests   []TestData
+	Limits  sandbox.RunLimits
+	Checker string // empty means exact
 }
